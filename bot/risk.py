@@ -18,7 +18,8 @@ class RiskManager:
 
     def size_trade(self, *, base_amount: float, confidence: float,
                    balance: float | None, daily_loss: float,
-                   live_trades_today: int) -> RiskDecision:
+                   live_trades_today: int,
+                   current_drawdown: float = 0.0) -> RiskDecision:
         if daily_loss <= -abs(self.settings.max_daily_loss):
             return RiskDecision(False, reason=f"daily loss guard hit: ${daily_loss:.2f}")
 
@@ -35,6 +36,9 @@ class RiskManager:
 
         amount = max(self.settings.min_trade_amount, amount)
         amount = min(self.settings.max_trade_amount, amount)
+
+        if current_drawdown < 0:
+            amount = self.get_max_drawdown_protection(amount, current_drawdown, max_drawdown_threshold=0.15)
 
         if balance is not None:
             amount = min(amount, balance)

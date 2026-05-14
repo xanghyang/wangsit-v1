@@ -2,6 +2,7 @@ from dataclasses import dataclass
 
 from bot.binance import BinanceClient
 from bot.config import Settings
+from bot.multi_timeframe import MultiTimeframeAnalyzer
 
 
 @dataclass
@@ -17,6 +18,8 @@ class Signal:
     momentum: str = "no data"
     atr: float = 0.0
     current_range: float = 0.0
+    multi_tf_enabled: bool = False
+    multi_tf_conflict: bool = False
 
     def as_dict(self) -> dict:
         return self.__dict__.copy()
@@ -26,8 +29,59 @@ class SignalEngine:
     def __init__(self, settings: Settings, binance: BinanceClient):
         self.settings = settings
         self.binance = binance
+        self.mtf_analyzer = MultiTimeframeAnalyzer(settings, binance)
 
-    def analyze(self, symbol: str, window_ts: int) -> Signal:
+    def analyze(self, symbol: str, window_ts: int, use_multi_tf: bool = True) -> Signal:
+        if use_multi_tf:
+            return self._analyze_multi_tf(symbol, window_ts)
+        return self._analyze_single_tf(symbol, window_ts)
+
+    def _analyze_multi_tf(self, symbol: str, window_ts: int) -> Signal:
+        mtf_result = self.mtf_analyzer.analyze_all(symbol, window_ts)
+
+        if not mtf_result.consensus_direction:
+            current_price = self.binance.price(symbol)
+            return Signal(
+                confidence=0,
+                direction=None,
+                reason=f"Multi-TF no consensus: {mtf_result.reason}",
+                current_price=current_price if current_price > 0 else 0,
+                multi_tf_enabled=True,
+                multi_tf_conflict=mtf_result.conflict_detected,
+            )
+
+        confidence = mtf_result.consensus_confidence
+        if mtf_result.conflict_detected:
+            confidence *= 0.7
+
+        if confidence < self.settings.min_confidence:
+            return Signal(
+                confidence=confidence,
+                direction=mtf_result.consensus_direction,
+                reason=f"Multi-TF low confidence: {mtf_result.reason}",
+                score=mtf_result.final_score,
+                multi_tf_enabled=True,
+                multi_tf_conflict=mtf_result.conflict_detected,
+            )
+
+        primary_tf = mtf_result.tf_signals[0] if mtf_result.tf_signals else None
+
+        return Signal(
+            score=mtf_result.final_score,
+            confidence=confidence,
+            direction=mtf_result.consensus_direction,
+            window_open=primary_tf.window_open if primary_tf else 0,
+            current_price=primary_tf.price if primary_tf else 0,
+            delta_pct=primary_tf.delta_pct if primary_tf else 0,
+            delta_weight=abs(mtf_result.final_score),
+            momentum=primary_tf.momentum if primary_tf else "no data",
+            atr=primary_tf.atr if primary_tf else 0,
+            reason=mtf_result.reason,
+            multi_tf_enabled=True,
+            multi_tf_conflict=mtf_result.conflict_detected,
+        )
+
+    def _analyze_single_tf(self, symbol: str, window_ts: int) -> Signal:
         current_price = self.binance.price(symbol)
         if current_price <= 0:
             return Signal(confidence=0, direction=None, reason="no Binance price")

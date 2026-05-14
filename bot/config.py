@@ -53,6 +53,9 @@ class Settings:
     atr_periods: int = env_int("ATR_PERIODS", 5)
     atr_multiplier: float = env_float("ATR_MULTIPLIER", 1.5)
 
+    enable_multi_tf: bool = env_bool("ENABLE_MULTI_TF", True)
+    multi_tf_min_agreement: int = env_int("MULTI_TF_MIN_AGREEMENT", 2)
+
     markets: dict[str, str] = field(default_factory=lambda: {
         "btc-updown-5m": "BTC",
         "eth-updown-5m": "ETH",

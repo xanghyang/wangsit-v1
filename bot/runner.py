@@ -128,12 +128,21 @@ class CryptoBot:
                     continue
 
                 if seconds_left > self.settings.entry_seconds_max + 5:
-                    log(
-                        f"   [{crypto}] {seconds_left:.0f}s | "
-                        f"PM:{market['winner_side']}@{market['winner_price']:.3f} | "
-                        f"Price:{signal.current_price:.2f} | delta:{signal.delta_pct:.4f}% | "
-                        f"conf:{signal.confidence:.0%}"
-                    )
+                    if signal.multi_tf_enabled:
+                        conflict_flag = " [CONFLICT]" if signal.multi_tf_conflict else ""
+                        log(
+                            f"   [{crypto}] {seconds_left:.0f}s | "
+                            f"PM:{market['winner_side']}@{market['winner_price']:.3f} | "
+                            f"Price:{signal.current_price:.2f} | delta:{signal.delta_pct:.4f}% | "
+                            f"conf:{signal.confidence:.0%}{conflict_flag}"
+                        )
+                    else:
+                        log(
+                            f"   [{crypto}] {seconds_left:.0f}s | "
+                            f"PM:{market['winner_side']}@{market['winner_price']:.3f} | "
+                            f"Price:{signal.current_price:.2f} | delta:{signal.delta_pct:.4f}% | "
+                            f"conf:{signal.confidence:.0%}"
+                        )
                     continue
 
                 log(
@@ -159,7 +168,7 @@ class CryptoBot:
                 market["winner_price"] = clob_price
             crypto_name = self.settings.markets[prefix]
             binance_symbol = self.settings.binance_symbols.get(crypto_name, "BTCUSDT")
-            signal = self.signal_engine.analyze(binance_symbol, close_ts - 300)
+            signal = self.signal_engine.analyze(binance_symbol, close_ts - 300, use_multi_tf=self.settings.enable_multi_tf)
             return prefix, market, signal
 
         with ThreadPoolExecutor(max_workers=len(pending)) as executor:
@@ -214,6 +223,7 @@ class CryptoBot:
             balance=live_balance,
             daily_loss=self.state.daily_loss,
             live_trades_today=self.state.live_trades_today,
+            current_drawdown=self.state.daily_loss,
         )
         if not decision.allowed:
             log(f"   [{crypto}] SKIP - risk guard: {decision.reason}")
