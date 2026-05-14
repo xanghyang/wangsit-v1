@@ -32,21 +32,21 @@ load_dotenv()
 # ─── CONFIG ────────────────────────────────────────────────────────────────────
 GAMMA_API         = "https://gamma-api.polymarket.com"
 CLOB_API          = "https://clob.polymarket.com"
-BINANCE_API       = "https://api.binance.com"
+BINANCE_API       = "https://data-api.binance.vision"
 
 ENTRY_SECONDS_MAX = 50
 ENTRY_SECONDS_MIN = 10
 PRICE_MIN         = {          # minimum price per crypto — BTC stricter due to higher volatility
-    "BTC": 0.94,
-    "ETH": 0.92,
+    "BTC": 0.52,
+    "ETH": 0.52,
 }
-PRICE_MAX         = 0.99   # maximum price — CLOB accepts up to 0.99
+PRICE_MAX         = 0.93   # maximum price — CLOB accepts up to 0.93
 
 WAKE_BEFORE       = 65
 POLL_INTERVAL     = 3
 
 # Window Delta thresholds (current price vs period-open price)
-DELTA_SKIP        = 0.0005  # < 0.05% → too close to the line, skip
+DELTA_SKIP        = 0.0003  # < 0.03% → too close to the line, skip
 DELTA_WEAK        = 0.001   # 0.05–0.10% → weak signal
 DELTA_STRONG      = 0.002   # > 0.20% → strong signal
 
@@ -364,32 +364,49 @@ class CryptoBot:
         self.trades       = []
         self.private_key  = os.getenv("POLY_PRIVATE_KEY", "")
         self.proxy_wallet = os.getenv("POLY_PROXY_WALLET", "")
+        # --- MUTANS COMPOUND v0.1 (student china $0.99) ---
+        self.base_amount = max(0.99, amount)  # floor $0.99
+        self.compound_rate = 0.02  # 2% growth per trade
 
         if not paper and not dry_run and (not self.private_key or not self.proxy_wallet):
             raise ValueError("POLY_PRIVATE_KEY and POLY_PROXY_WALLET required in .env")
 
         mode = "DRY RUN" if dry_run else ("PAPER" if paper else "🔴 LIVE")
         log("=" * 60)
-        log(f"Crypto Up/Down Bot | {mode} | ${amount}/trade")
+        log(f"Crypto Up/Down Bot | {mode} | start ${amount:.2f}/trade | MUTANS VPS v0.1")
         log(f"Markets: {', '.join(MARKETS.values())}")
         log(f"Entry window: {ENTRY_SECONDS_MIN}-{ENTRY_SECONDS_MAX}s | "
             f"Price: BTC>={PRICE_MIN['BTC']} ETH>={PRICE_MIN['ETH']} max={PRICE_MAX}")
         log(f"Min delta: {DELTA_SKIP*100:.3f}% | Min confidence: {MIN_CONFIDENCE*100:.0f}%")
+        log("Auto-restart: exit after 10 errors | Wallet-zero sleep: 1h")
         log("=" * 60)
 
     def run(self):
+        consecutive_errors = 0
         while True:
             try:
                 self._cycle()
+                consecutive_errors = 0  # reset on success
             except KeyboardInterrupt:
                 log("Stopped.")
                 self._print_summary()
                 break
             except Exception as e:
-                log(f"Error: {e}")
+                consecutive_errors += 1
+                log(f"Error #{consecutive_errors}: {e}")
+                if consecutive_errors > 10:
+                    log("Too many consecutive errors — exiting for Railway/VPS auto-restart")
+                    self._print_summary()
+                    break
                 time.sleep(5)
 
     def _cycle(self):
+        # --- VPS SAFETY: wallet zero check ---
+        if not self.paper and not self.dry_run and self.amount < 0.99:
+            log(f"💰 Wallet base below $0.99 (${self.amount:.2f}) — sleeping 1h to avoid dust trades")
+            time.sleep(3600)
+            return
+
         close_ts   = next_close_ts()
         sleep_secs = close_ts - now_unix() - WAKE_BEFORE
 
@@ -522,16 +539,39 @@ class CryptoBot:
 
     def _enter(self, market: dict, ta: dict, seconds_left: float):
         price        = market["winner_price"]
-        expected_pnl = (self.amount / price) - self.amount
-        expected_pct = expected_pnl / self.amount * 100
         crypto       = market["crypto"]
+        confidence   = ta.get("confidence", MIN_CONFIDENCE)
+
+        # --- MUTANS COMPOUND: hitung bet size dinamis ---
+        # base = 2% dari amount saat ini, floor $0.99, scale dengan confidence
+        dynamic_amount = max(0.99, self.amount * (confidence / MIN_CONFIDENCE))
+        
+        # mode LIVE: coba ambil balance real USDC untuk auto-compound presisi
+        if not self.paper and not self.dry_run:
+            try:
+                from py_clob_client.client import ClobClient
+                _c = ClobClient(host=CLOB_API, key=self.private_key, chain_id=137, signature_type=1, funder=self.proxy_wallet)
+                _c.set_api_creds(_c.create_or_derive_api_creds())
+                # get_balance() kadang return float, kadang dict
+                bal = _c.get_balance()
+                usdc = float(bal['usdc']) if isinstance(bal, dict) and 'usdc' in bal else float(bal) if bal else self.amount
+                if usdc >= 0.99:
+                    # student china: 2% dari bankroll, dikali confidence boost
+                    dynamic_amount = max(0.99, usdc * 0.02 * (confidence / MIN_CONFIDENCE))
+            except Exception:
+                # fallback ke in-memory compound kalau API gagal
+                pass
+
+        dynamic_amount = round(dynamic_amount, 2)
+        expected_pnl = (dynamic_amount / price) - dynamic_amount
+        expected_pct = expected_pnl / dynamic_amount * 100
 
         log(f"🟢 ENTERING [{crypto} {market['winner_side']}] {market['title'][:45]}")
         log(f"   price={price:.3f} | time_left={seconds_left:.1f}s | "
-            f"invested=${self.amount:.2f} | expected_pnl=+${expected_pnl:.2f} (+{expected_pct:.1f}%)")
+            f"invested=${dynamic_amount:.2f} | expected_pnl=+${expected_pnl:.2f} (+{expected_pct:.1f}%)")
         log(f"   Price:{ta.get('current_price',0):.2f} | "
             f"delta:{ta.get('delta_pct',0):.4f}% | "
-            f"conf:{ta.get('confidence',0):.0%}")
+            f"conf:{confidence:.0%} | compound_base=${self.amount:.2f}")
 
         if self.paper or self.dry_run:
             mode = "📄 PAPER" if self.paper else "🔍 DRY RUN"
@@ -539,7 +579,7 @@ class CryptoBot:
             executed = True
         else:
             executed = execute_buy(
-                market["winner_token"], self.amount, price,
+                market["winner_token"], dynamic_amount, price,
                 self.private_key, self.proxy_wallet
             )
 
@@ -549,14 +589,16 @@ class CryptoBot:
                 "title":        market["title"],
                 "side":         market["winner_side"],
                 "price_entry":  price,
-                "amount":       self.amount,
+                "amount":       dynamic_amount,
                 "seconds_left": seconds_left,
                 "pnl_expected": expected_pnl,
                 "delta_pct":    ta.get("delta_pct", 0),
-                "confidence":   ta.get("confidence", 0),
+                "confidence":   confidence,
                 "timestamp":    ts_str(),
             })
-            log(f"   ✅ Trade #{len(self.trades)} recorded [{crypto}]")
+            # --- update compound base untuk trade berikutnya ---
+            self.amount = max(0.99, dynamic_amount * (1 + self.compound_rate))
+            log(f"   ✅ Trade #{len(self.trades)} recorded [{crypto}] | next_base=${self.amount:.2f}")
 
     def _print_summary(self):
         log("─" * 60)
@@ -581,7 +623,7 @@ if __name__ == "__main__":
     parser.add_argument("--paper",    action="store_true", help="Paper trading mode (simulated)")
     parser.add_argument("--live",     action="store_true", help="Live trading mode (real funds)")
     parser.add_argument("--dry-run",  action="store_true", help="Dry run — real data, no trades executed")
-    parser.add_argument("--amount",   type=float, default=10.0, help="USDC per trade")
+    parser.add_argument("--amount",   type=float, default=0.99, help="USDC per trade (start $0.99 student china)")
     args = parser.parse_args()
 
     dry_run = args.dry_run
