@@ -1,169 +1,222 @@
-# 📈 Crypto Up/Down 5min Bot
+# Wangsit V1 - Polymarket 5m Crypto Bot
 
-A Python trading bot for **ETH and BTC Up/Down 5-minute markets on [Polymarket](https://polymarket.com)**, powered by real-time Binance price data.
+Production-oriented Python worker for BTC/ETH Up/Down 5-minute prediction markets on Polymarket. The bot uses Binance price data for signal generation, Polymarket Gamma/CLOB data for market selection, and a guarded auto-compound sizing model for live execution.
 
-The bot uses a **Window Delta strategy** combined with micro momentum and ATR volatility filtering to identify high-confidence entries in the final seconds before each market closes.
+This repo is designed to run as a long-lived worker on Railway or a VPS.
 
----
+## What It Does
 
-## ✨ Features
+- Trades BTC/ETH 5-minute Up/Down markets near the end of each window.
+- Uses window delta, micro momentum, and ATR filtering.
+- Confirms that Binance direction matches Polymarket's leading side.
+- Keeps auto-compound sizing, bounded by production risk guards.
+- Persists runtime state to avoid duplicate entries after restart.
+- Exits non-zero after repeated errors so Railway/VPS can restart it.
+- Supports Healthchecks.io and Telegram alerts through environment variables.
 
-- **Window Delta filter** — compares current crypto price to the period's open price (fetched from Binance); skips entries when the price is too close to the line
-- **Micro momentum confirmation** — checks the direction of the last 2 × 1-minute candles to reinforce the signal
-- **ATR volatility filter** — skips entries when the current period's range exceeds 1.5× the historical average (too volatile)
-- **Composite confidence score** — normalized 0–100% signal strength; configurable minimum threshold
-- **Direction alignment check** — Binance trend must match the Polymarket leading side before entering
-- **Per-crypto price thresholds** — stricter entry price for BTC (≥ 0.94) than ETH (≥ 0.92)
-- **Three run modes** — Paper (simulated), Live (real funds), Dry Run (real data, no execution)
-- **Parallel data fetching** — Polymarket and Binance queries run concurrently via `ThreadPoolExecutor`
-- **Session summary** — prints a full trade log on exit (Ctrl+C)
+## Current Architecture
 
----
-
-## 🧠 Strategy
-
-Every 5 minutes Polymarket resolves whether ETH (or BTC) closed **Up** or **Down** relative to its price at the start of the period.
-
-The bot wakes up ~65 seconds before each market close and begins monitoring. It only places a bet when **all** of the following conditions are met:
-
-| Condition | Description |
-|---|---|
-| **Entry window** | Between 10 and 50 seconds before close |
-| **PM price** | Polymarket CLOB mid-price ≥ `PRICE_MIN` and ≤ 0.99 |
-| **Window Delta** | `\|current − open\| / open` > 0.05% (not too close to the line) |
-| **Confidence** | Composite score ≥ 30% (configurable) |
-| **Direction match** | Binance delta direction == Polymarket leading side |
-| **ATR** | Current period range ≤ 1.5× historical ATR |
-
-### Score Weighting
-
-| Delta magnitude | Weight |
-|---|---|
-| > 1.0% | 7 |
-| > 0.20% | 5 |
-| > 0.10% | 3 |
-| > 0.05% | 1 |
-| Momentum confirms | +2 |
-| **Max possible** | **9** |
-
-Confidence = `abs(score) / 9.0`, capped at 100%.
-
----
-
-## 📋 Requirements
-
-- Python **3.10+**
-- A [Polymarket](https://polymarket.com) account with USDC on Polygon (for live trading)
-- No Binance account needed (public API)
-
----
-
-## 🚀 Installation
-
-```bash
-# 1. Clone the repo
-git clone https://github.com/your-username/copy-trader.git
-cd copy-trader
-
-# 2. Create a virtual environment (recommended)
-python -m venv .venv
-source .venv/bin/activate
-
-# 3. Install dependencies
-pip install -r requirements.txt
-
-# 4. Set up your environment variables
-cp .env.example .env
-# Edit .env and fill in your keys (only required for --live mode)
+```text
+wangsit-v1/
+|-- crypto_bot.py              # Compatibility entrypoint
+|-- bot/
+|   |-- main.py                # CLI parsing
+|   |-- runner.py              # Main bot loop and orchestration
+|   |-- config.py              # Environment-driven settings
+|   |-- binance.py             # Binance public API client
+|   |-- polymarket.py          # Polymarket Gamma/CLOB read client
+|   |-- signal.py              # Window delta, momentum, ATR signal engine
+|   |-- risk.py                # Auto-compound and risk guards
+|   |-- execution.py           # Polymarket CLOB execution client
+|   |-- state.py               # Persistent JSON state
+|   |-- notify.py              # Healthcheck and Telegram hooks
+|   `-- time_utils.py          # Time helpers
+|-- tests/                     # Unit tests
+|-- Procfile                   # Railway worker command
+|-- railway.json               # Railway restart policy
+|-- requirements.txt
+`-- .env.example
 ```
 
----
-
-## ⚙️ Configuration
-
-All key parameters are defined at the top of `crypto_bot.py`:
-
-| Constant | Default | Description |
-|---|---|---|
-| `ENTRY_SECONDS_MIN` | `10` | Earliest entry (seconds before close) |
-| `ENTRY_SECONDS_MAX` | `50` | Latest entry (seconds before close) |
-| `PRICE_MIN["ETH"]` | `0.92` | Minimum Polymarket price for ETH entries |
-| `PRICE_MIN["BTC"]` | `0.94` | Minimum Polymarket price for BTC entries |
-| `PRICE_MAX` | `0.99` | Maximum Polymarket price (upside floor) |
-| `DELTA_SKIP` | `0.0005` | Minimum delta (< 0.05% → skip) |
-| `DELTA_WEAK` | `0.001` | Weak signal threshold (0.10%) |
-| `DELTA_STRONG` | `0.002` | Strong signal threshold (0.20%) |
-| `MIN_CONFIDENCE` | `0.3` | Minimum composite confidence (0.0–1.0) |
-| `ATR_PERIODS` | `5` | Number of 5min candles for ATR calculation |
-| `ATR_MULTIPLIER` | `1.5` | Maximum allowed range vs ATR |
-| `WAKE_BEFORE` | `65` | Seconds before close to start monitoring |
-| `POLL_INTERVAL` | `3` | Polling interval in seconds |
-
----
-
-## 🖥️ Usage
+## Run Modes
 
 ```bash
-# Paper mode — simulated trades, real data (default)
+# Paper mode, default if no mode is provided
 python crypto_bot.py --paper
 
-# Dry run — real data, no trades, no keys needed
+# Dry run, real data but no on-chain execution
 python crypto_bot.py --dry-run
 
-# Live mode — real funds (requires .env keys)
+# Live mode, real funds
 python crypto_bot.py --live
 
-# Live mode with custom bet size
-python crypto_bot.py --live --amount 25
+# Live mode with starting compound base
+python crypto_bot.py --live --amount 5
 ```
 
-Press **Ctrl+C** at any time to stop the bot and print the session summary.
+## Required Railway Variables
 
----
+For live trading, only these two are strictly required:
 
-## 🔑 Environment Variables
-
-Only required for `--live` mode. Create a `.env` file based on `.env.example`:
-
-| Variable | Description |
-|---|---|
-| `POLY_PRIVATE_KEY` | Your Polymarket wallet private key (Polygon) |
-| `POLY_PROXY_WALLET` | Your Polymarket proxy/funder wallet address |
-
----
-
-## 📁 Project Structure
-
-```
-copy-trader/
-├── crypto_bot.py       # Main bot
-├── requirements.txt    # Python dependencies
-├── .env.example        # Environment variable template
-├── .gitignore          # Git ignore rules
-└── README.md           # This file
+```text
+POLY_PRIVATE_KEY
+POLY_PROXY_WALLET
 ```
 
----
+In Railway's Variables UI, enter them as separate name/value pairs:
 
-## ⚠️ Disclaimer
+```text
+Name  : POLY_PRIVATE_KEY
+Value : your_private_key
 
-> **This software is for educational and experimental purposes only.**
->
-> - This is **not financial advice**.
-> - Prediction markets involve **real financial risk**. You can lose your entire investment.
-> - Past performance of any strategy does not guarantee future results.
-> - Use at your own risk. The authors accept no liability for any losses incurred.
-> - Always start with `--paper` or `--dry-run` mode before using real funds.
-> - Never risk money you cannot afford to lose.
+Name  : POLY_PROXY_WALLET
+Value : your_polymarket_proxy_or_funder_wallet
+```
 
----
+## Recommended Production Variables
 
-## 📄 License
+These are optional because the code has defaults, but they are recommended for production:
 
-MIT License — see [LICENSE](LICENSE) for details.
+```text
+STATE_PATH=data/state.json
+HEALTHCHECK_URL=https://hc-ping.com/your-healthchecks-id
+MAX_TRADE_AMOUNT=25
+BANKROLL_FRACTION=0.02
+MIN_TRADE_AMOUNT=0.99
+MAX_DAILY_LOSS=15
+MAX_CONSECUTIVE_LIVE_TRADES=24
+```
 
-## Collaborations
+Telegram alerts are optional:
 
-If this project was useful to you, contributions are welcome via USDC on Polygon:
+```text
+TELEGRAM_BOT_TOKEN=your_bot_token
+TELEGRAM_CHAT_ID=your_chat_id
+```
 
-**`0xbc48eAebC98463c7c9521e1310C13FC1A080B419`**
+### About `STATE_PATH`
+
+Default:
+
+```text
+STATE_PATH=data/state.json
+```
+
+This stores:
+
+- traded market slugs
+- trade attempts
+- executed trade records
+- current compound base
+- daily live trade count
+- heartbeat cycle counter
+
+On Railway without a mounted volume, this file is useful across short restarts but may disappear on redeploy. If you attach a Railway Volume mounted at `/data`, use:
+
+```text
+STATE_PATH=/data/state.json
+```
+
+## Strategy Defaults
+
+The runtime defaults live in `bot/config.py` and can be overridden with environment variables.
+
+| Setting | Default | Meaning |
+|---|---:|---|
+| `ENTRY_SECONDS_MIN` | `10` | Latest acceptable seconds before market close |
+| `ENTRY_SECONDS_MAX` | `50` | Earliest acceptable seconds before market close |
+| `WAKE_BEFORE` | `65` | Wake before close |
+| `POLL_INTERVAL` | `3` | Polling interval during active window |
+| `PRICE_MIN_BTC` | `0.52` | Minimum Polymarket leading-side price for BTC |
+| `PRICE_MIN_ETH` | `0.52` | Minimum Polymarket leading-side price for ETH |
+| `PRICE_MAX` | `0.93` | Maximum Polymarket entry price |
+| `DELTA_SKIP` | `0.0003` | Skip if delta is below this absolute threshold |
+| `DELTA_WEAK` | `0.001` | Weak delta threshold |
+| `DELTA_STRONG` | `0.002` | Strong delta threshold |
+| `MIN_CONFIDENCE` | `0.3` | Minimum signal confidence |
+| `ATR_PERIODS` | `5` | ATR lookback in 5-minute candles |
+| `ATR_MULTIPLIER` | `1.5` | Volatility skip threshold |
+
+## Auto-Compound Risk Model
+
+Live sizing uses real CLOB balance when available:
+
+```text
+amount = balance * BANKROLL_FRACTION * (confidence / MIN_CONFIDENCE)
+```
+
+Then it is bounded by:
+
+- `MIN_TRADE_AMOUNT`
+- `MAX_TRADE_AMOUNT`
+- available balance
+- `MAX_DAILY_LOSS`
+- `MAX_CONSECUTIVE_LIVE_TRADES`
+
+After an executed trade, the next in-memory compound base becomes:
+
+```text
+executed_amount * (1 + COMPOUND_RATE)
+```
+
+In paper/dry-run mode, the bot uses the persistent compound base because no live balance is available.
+
+## Railway Deployment
+
+1. Push this repo to GitHub.
+2. Create a Railway project from the GitHub repo.
+3. Railway will use the `Procfile`:
+
+```text
+worker: python crypto_bot.py --live
+```
+
+4. Add required variables:
+
+```text
+POLY_PRIVATE_KEY
+POLY_PROXY_WALLET
+```
+
+5. Add recommended variables such as `STATE_PATH` and `HEALTHCHECK_URL`.
+6. Deploy.
+
+The bot is a worker process, not a web server. Do not use the Railway app URL as `HEALTHCHECK_URL`. Use a Healthchecks.io ping URL, for example:
+
+```text
+https://hc-ping.com/xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+```
+
+## Local Development
+
+```bash
+python -m venv .venv
+.venv\Scripts\activate
+pip install -r requirements.txt
+python crypto_bot.py --dry-run
+```
+
+Run tests:
+
+```bash
+python -m unittest discover -s tests
+```
+
+Syntax check without writing `.pyc` files:
+
+```bash
+python -c "import pathlib; [compile(p.read_text(encoding='utf-8'), str(p), 'exec') for p in [pathlib.Path('crypto_bot.py'), *pathlib.Path('bot').glob('*.py'), *pathlib.Path('tests').glob('*.py')]]"
+```
+
+## Production Behavior
+
+- Recoverable API failures are skipped or logged.
+- Consecutive top-level errors trigger `sys.exit(1)` after the configured limit.
+- Railway/VPS supervisor should restart the worker on non-zero exit.
+- Duplicate market slugs are blocked through persistent state.
+- Heartbeat pings are sent when `HEALTHCHECK_URL` is configured.
+- Telegram messages are sent when both Telegram variables are configured.
+
+## Disclaimer
+
+This software is experimental and not financial advice. Prediction markets and crypto execution involve real financial risk. You can lose your entire balance. Always test with `--paper` or `--dry-run` before live mode, and keep risk limits conservative.
