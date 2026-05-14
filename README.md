@@ -1,12 +1,12 @@
 # Wangsit V1 - Polymarket 5m Crypto Bot
 
-Production-oriented Python worker for BTC/ETH Up/Down 5-minute prediction markets on Polymarket. The bot uses Binance price data for signal generation, Polymarket Gamma/CLOB data for market selection, and a guarded auto-compound sizing model for live execution.
+Production-oriented Python worker for BTC/ETH Up/Down 1m, 5m, 15m, 1h prediction markets on Polymarket. The bot uses Binance price data for signal generation, Polymarket Gamma/CLOB data for market selection, and a guarded auto-compound sizing model for live execution.
 
 This repo is designed to run as a long-lived worker on Railway or a VPS.
 
 ## What It Does
 
-- Trades BTC/ETH 5-minute Up/Down markets near the end of each window.
+- Trades BTC/ETH **Multi Timeframe Analysis**: 1m, 5m, 15m, 1h
 - Uses window delta, micro momentum, and ATR filtering.
 - Confirms that Binance direction matches Polymarket's leading side.
 - Keeps auto-compound sizing, bounded by production risk guards.
