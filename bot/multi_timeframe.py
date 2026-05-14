@@ -1,0 +1,12 @@
+from bot.config import Settings 
+""  
+"""\"\"\"Multi-timeframe analysis for enhanced signal processing.\"\"\""""  
+""  
+"import pandas as pd"  
+"import numpy as np"  
+"from typing import Dict, List, Optional, Tuple"  
+"from dataclasses import dataclass"  
+""  
+"from bot.config import Settings"  
+"from bot.binance import BinanceClient"  
+"" 
