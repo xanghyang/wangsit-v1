@@ -45,9 +45,12 @@ class BotState:
 
     def save(self, path: str) -> None:
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        # Issue 3.B Fix: Bound in-memory list to prevent RAM leak
+        if len(self.trades) > 500:
+            self.trades = self.trades[-500:]
         payload = {
             "traded_slugs": sorted(self.traded_slugs),
-            "trades": self.trades[-500:],
+            "trades": self.trades,
             "compound_base": self.compound_base,
             "daily_loss": self.daily_loss,
             "live_trades_today": self.live_trades_today,
@@ -55,7 +58,14 @@ class BotState:
             "heartbeat_cycles": self.heartbeat_cycles,
         }
         tmp_path = f"{path}.tmp"
-        with open(tmp_path, "w", encoding="utf-8") as fh:
-            json.dump(payload, fh, indent=2, sort_keys=True)
-        os.replace(tmp_path, path)
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as fh:
+                json.dump(payload, fh, indent=2, sort_keys=True)
+            os.replace(tmp_path, path)
+        finally:
+            if os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except Exception:
+                    pass
 

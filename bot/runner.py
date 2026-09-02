@@ -31,6 +31,9 @@ class CryptoBot:
         self.risk = RiskManager(self.settings)
         self.notifier = Notifier(self.settings)
         self.execution = None if self.paper or self.dry_run else ExecutionClient(self.settings)
+        # Issue 3.C Fix: Reusable ThreadPoolExecutor to prevent thread churn & socket leakage
+        max_workers = max(1, len(self.settings.markets))
+        self._executor = ThreadPoolExecutor(max_workers=max_workers)
 
         mode = "DRY RUN" if dry_run else ("PAPER" if paper else "LIVE")
         log("=" * 60)
@@ -51,27 +54,30 @@ class CryptoBot:
 
     def run(self) -> None:
         consecutive_errors = 0
-        while True:
-            try:
-                self.state.reset_daily_if_needed()
-                self._cycle()
-                consecutive_errors = 0
-                self._save_state()
-            except KeyboardInterrupt:
-                log("Stopped.")
-                self._print_summary()
-                self._save_state()
-                return
-            except Exception as exc:
-                consecutive_errors += 1
-                log(f"Error #{consecutive_errors}: {exc}")
-                self._save_state()
-                if consecutive_errors > self.settings.consecutive_error_limit:
-                    log("Too many consecutive errors - exiting non-zero for Railway/VPS restart")
+        try:
+            while True:
+                try:
+                    self.state.reset_daily_if_needed()
+                    self._cycle()
+                    consecutive_errors = 0
+                    self._save_state()
+                except KeyboardInterrupt:
+                    log("Stopped.")
                     self._print_summary()
-                    self.notifier.heartbeat(f"Wangsit bot exiting after {consecutive_errors} errors: {exc}")
-                    sys.exit(1)
-                time.sleep(self.settings.error_sleep_seconds)
+                    self._save_state()
+                    return
+                except Exception as exc:
+                    consecutive_errors += 1
+                    log(f"Error #{consecutive_errors}: {exc}")
+                    self._save_state()
+                    if consecutive_errors > self.settings.consecutive_error_limit:
+                        log("Too many consecutive errors - exiting non-zero for Railway/VPS restart")
+                        self._print_summary()
+                        self.notifier.heartbeat(f"Wangsit bot exiting after {consecutive_errors} errors: {exc}")
+                        sys.exit(1)
+                    time.sleep(self.settings.error_sleep_seconds)
+        finally:
+            self._executor.shutdown(wait=False)
 
     def _cycle(self) -> None:
         self._maybe_heartbeat()
@@ -171,9 +177,8 @@ class CryptoBot:
             signal = self.signal_engine.analyze(binance_symbol, close_ts - 300, use_multi_tf=self.settings.enable_multi_tf)
             return prefix, market, signal
 
-        with ThreadPoolExecutor(max_workers=len(pending)) as executor:
-            futures = {executor.submit(fetch_all, p): p for p in pending}
-            return [future.result() for future in as_completed(futures)]
+        futures = {self._executor.submit(fetch_all, p): p for p in pending}
+        return [future.result() for future in as_completed(futures)]
 
     def _evaluate_entry(self, market: dict, signal: dict, seconds_left: float) -> bool:
         slug = market["slug"]

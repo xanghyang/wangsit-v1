@@ -89,9 +89,12 @@ class SignalEngine:
         window_open = self.binance.window_open_price(symbol, window_ts)
         if window_open <= 0:
             candles = self.binance.candles(symbol, "1m", 6)
-            if not candles:
+            if not candles or not isinstance(candles, list) or len(candles) == 0 or len(candles[0]) < 2:
                 return Signal(confidence=0, direction=None, reason="no open price")
-            window_open = float(candles[0][1])
+            try:
+                window_open = float(candles[0][1])
+            except (ValueError, TypeError, IndexError):
+                return Signal(confidence=0, direction=None, reason="invalid open price data")
 
         delta = (current_price - window_open) / window_open
         delta_pct = abs(delta) * 100
@@ -100,19 +103,22 @@ class SignalEngine:
         atr = self.binance.atr(symbol, window_ts, self.settings.atr_periods)
         if atr > 0:
             current_candle = self.binance.candles(symbol, "5m", 1)
-            if current_candle:
-                current_range = float(current_candle[0][2]) - float(current_candle[0][3])
-                if current_range > atr * self.settings.atr_multiplier:
-                    return Signal(
-                        confidence=0,
-                        direction=None,
-                        window_open=window_open,
-                        current_price=current_price,
-                        delta_pct=delta_pct,
-                        atr=atr,
-                        current_range=current_range,
-                        reason=f"ATR skip: range ${current_range:.2f} > {self.settings.atr_multiplier}x ATR ${atr:.2f}",
-                    )
+            if current_candle and isinstance(current_candle, list) and len(current_candle) > 0 and len(current_candle[0]) >= 4:
+                try:
+                    current_range = float(current_candle[0][2]) - float(current_candle[0][3])
+                    if current_range > atr * self.settings.atr_multiplier:
+                        return Signal(
+                            confidence=0,
+                            direction=None,
+                            window_open=window_open,
+                            current_price=current_price,
+                            delta_pct=delta_pct,
+                            atr=atr,
+                            current_range=current_range,
+                            reason=f"ATR skip: range ${current_range:.2f} > {self.settings.atr_multiplier}x ATR ${atr:.2f}",
+                        )
+                except (ValueError, TypeError, IndexError):
+                    pass
 
         if abs(delta) < self.settings.delta_skip:
             return Signal(
@@ -130,15 +136,18 @@ class SignalEngine:
         momentum_str = "no data"
 
         candles = self.binance.candles(symbol, "1m", 3)
-        if len(candles) >= 2:
-            prev_close = float(candles[-2][4])
-            last_close = float(candles[-1][4])
-            momentum_up = last_close > prev_close
-            if (delta > 0 and momentum_up) or (delta < 0 and not momentum_up):
-                score += 2 if score > 0 else -2
-                momentum_str = f"{'up' if momentum_up else 'down'} {last_close:.2f} (confirms)"
-            else:
-                momentum_str = f"{'up' if momentum_up else 'down'} {last_close:.2f} (contradicts, ignored)"
+        if isinstance(candles, list) and len(candles) >= 2 and len(candles[-2]) >= 5 and len(candles[-1]) >= 5:
+            try:
+                prev_close = float(candles[-2][4])
+                last_close = float(candles[-1][4])
+                momentum_up = last_close > prev_close
+                if (delta > 0 and momentum_up) or (delta < 0 and not momentum_up):
+                    score += 2 if score > 0 else -2
+                    momentum_str = f"{'up' if momentum_up else 'down'} {last_close:.2f} (confirms)"
+                else:
+                    momentum_str = f"{'up' if momentum_up else 'down'} {last_close:.2f} (contradicts, ignored)"
+            except (ValueError, TypeError, IndexError):
+                pass
 
         confidence = min(abs(score) / 9.0, 1.0)
         direction = "Up" if score > 0 else "Down"

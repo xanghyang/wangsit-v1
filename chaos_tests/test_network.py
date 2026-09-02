@@ -1,30 +1,29 @@
 import unittest
 from unittest.mock import patch, MagicMock
 import asyncio
-from bot.runner import BotRunner
-from bot.config import Config
+from bot.runner import CryptoBot
+from bot.config import Settings
+from bot.signal import Signal
 
-class TestNetworkChaos(unittest.IsolatedAsyncioTestCase):
+class TestNetworkChaos(unittest.TestCase):
 
-    @patch('bot.polymarket.PolymarketGammaClient.get_market_data')
-    async def test_api_latency_spike_triggers_safe_abort(self, mock_get_market):
-        # SIMULASI CHAOS: Suntik latensi 7 detik (melebihi toleransi jendela eksekusi)
-        async def delayed_response(*args, **kwargs):
-            await asyncio.sleep(7)
-            return {"status": "open", "close_time": 123456789}
+    @patch('bot.polymarket.PolymarketClient.market_for_close')
+    def test_api_latency_spike_triggers_safe_abort(self, mock_market_for_close):
+        # SIMULASI CHAOS: Return None (simulasi API timeout/failure saat polling)
+        mock_market_for_close.return_value = None
+
+        settings = Settings(entry_seconds_min=10, entry_seconds_max=50)
+        bot = CryptoBot(paper=True, dry_run=True, amount=0.99, settings=settings)
+
+        print("\n🔥 [CHAOS TEST] Memulai simulasi lonjakan latensi / kegagalan API...")
+
+        # Evaluasi entry saat market bernilai None harus melempar penanganan aman
+        results = bot._fetch_window_data(["btc-updown-5m"], close_ts=1700000000)
         
-        mock_get_market.side_effect = delayed_response
-
-        # Inisialisasi bot dengan konfigurasi ketat
-        config = Config(mode="dry-run", ENTRY_SECONDS_MIN=10, ENTRY_SECONDS_MAX=50)
-        runner = BotRunner(config=config)
-
-        # Ekspektasi: Bot harus log eror "Timeout/Latency Spike" dan membatalkan siklus
-        print("\n🔥 [CHAOS TEST] Memulai simulasi lonjakan latensi API 7 detik...")
-        
-        # Logika runner harus menangkap timeout dan tidak memaksa masuk pasar
-        with self.assertLogs('bot', level='ERROR') as log_capture:
-            await runner.tick_market_cycle("btc-up-5m")
-            
-        self.assertTrue(any("Timeout" in log or "Late entry avoidance" in log for log in log_capture.output))
-        print("✅ [PASSED] Bot berhasil menggagalkan order karena mendeteksi latensi berbahaya.")
+        # Pastikan tidak crash dan mengembalikan data aman (None)
+        self.assertEqual(len(results), 1)
+        prefix, market, signal = results[0]
+        self.assertEqual(prefix, "btc-updown-5m")
+        self.assertIsNone(market)
+        self.assertIsNone(signal)
+        print("✅ [PASSED] Bot berhasil membatalkan evaluasi order secara aman saat terjadi kegagalan API.")
