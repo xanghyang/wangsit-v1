@@ -74,7 +74,7 @@ class MultiTimeframeAnalyzer:
             atr = self.binance.atr(symbol, window_ts, self.settings.atr_periods)
             if atr > 0:
                 candles = self.binance.candles(symbol, tf, 1)
-                if candles:
+                if candles and isinstance(candles, list) and len(candles) > 0 and len(candles[0]) >= 4:
                     high = float(candles[0][2])
                     low = float(candles[0][3])
                     current_range = high - low
@@ -117,17 +117,23 @@ class MultiTimeframeAnalyzer:
         else:
             candles = None
 
-        if candles and len(candles) > 0:
-            return float(candles[0][1])
+        if candles and isinstance(candles, list) and len(candles) > 0 and len(candles[0]) >= 2:
+            try:
+                return float(candles[0][1])
+            except (ValueError, TypeError, IndexError):
+                return 0.0
         return 0.0
 
     def _get_momentum(self, symbol: str, tf: str) -> str:
         candles = self.binance.candles(symbol, tf, 3)
-        if len(candles) >= 2:
-            prev_close = float(candles[-2][4])
-            last_close = float(candles[-1][4])
-            momentum_up = last_close > prev_close
-            return f"{'up' if momentum_up else 'down'} {last_close}"
+        if isinstance(candles, list) and len(candles) >= 2 and len(candles[-2]) >= 5 and len(candles[-1]) >= 5:
+            try:
+                prev_close = float(candles[-2][4])
+                last_close = float(candles[-1][4])
+                momentum_up = last_close > prev_close
+                return f"{'up' if momentum_up else 'down'} {last_close}"
+            except (ValueError, TypeError, IndexError):
+                return "no data"
         return "no data"
 
     def _delta_weight(self, abs_delta: float) -> int:

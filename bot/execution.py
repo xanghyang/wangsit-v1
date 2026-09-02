@@ -63,8 +63,13 @@ class ExecutionClient:
     def _ensure_log_dir(self):
         os.makedirs("data", exist_ok=True)
 
-    def _clob(self):
-        if self._client is None:
+    def reset_client(self):
+        log("[EXEC] Resetting CLOB client session and credentials...")
+        self._client = None
+        self._client_initialized = False
+
+    def _clob(self, force_refresh: bool = False):
+        if self._client is None or force_refresh:
             from py_clob_client.client import ClobClient
 
             client = ClobClient(
@@ -81,6 +86,11 @@ class ExecutionClient:
             self._client_initialized = True
         return self._client
 
+    def _is_auth_or_connection_error(self, error: str) -> bool:
+        patterns = ["401", "unauthorized", "api key", "credentials", "session", "429", "connection", "disconnected", "reset"]
+        err_lower = error.lower()
+        return any(p in err_lower for p in patterns)
+
     def get_tick_size(self, token_id: str) -> float:
         if token_id in self._tick_size_cache:
             return self._tick_size_cache[token_id]
@@ -91,6 +101,8 @@ class ExecutionClient:
             return float(tick_size)
         except Exception as e:
             log(f"[EXEC] Failed to get tick_size: {e}")
+            if self._is_auth_or_connection_error(str(e)):
+                self.reset_client()
             return 0.01
 
     def get_order_book(self, token_id: str) -> dict | None:
@@ -98,6 +110,8 @@ class ExecutionClient:
             return self._clob().get_order_book(token_id)
         except Exception as e:
             log(f"[EXEC] Failed to get order_book: {e}")
+            if self._is_auth_or_connection_error(str(e)):
+                self.reset_client()
             return None
 
     def _calculate_liquidity_depth(self, order_book: dict, side: str = "asks") -> float:
@@ -151,6 +165,8 @@ class ExecutionClient:
             return float(bal) if bal is not None else None
         except Exception as exc:
             log(f"[BALANCE ERROR] {exc}")
+            if self._is_auth_or_connection_error(str(exc)):
+                self.reset_client()
             return None
 
     def _validate_price(self, price: float, tick_size: float) -> float:
@@ -234,6 +250,17 @@ class ExecutionClient:
             "error": order_log.error
         })
         
+        # Issue 3.A Fix: Log rotation to prevent unbounded disk usage
+        try:
+            max_log_bytes = 5 * 1024 * 1024  # 5MB limit
+            if os.path.exists(self._order_log_path) and os.path.getsize(self._order_log_path) > max_log_bytes:
+                backup_path = f"{self._order_log_path}.1"
+                if os.path.exists(backup_path):
+                    os.remove(backup_path)
+                os.rename(self._order_log_path, backup_path)
+        except Exception as e:
+            log(f"[EXEC] Order log rotation error: {e}")
+
         with open(self._order_log_path, "a") as f:
             f.write(log_entry + "\n")
         
@@ -283,7 +310,10 @@ class ExecutionClient:
             return False, status, order_id, aggressive_price, fills
 
         except Exception as exc:
-            return False, str(exc), "", aggressive_price, []
+            err_msg = str(exc)
+            if self._is_auth_or_connection_error(err_msg):
+                self.reset_client()
+            return False, err_msg, "", aggressive_price, []
 
     def _try_order_fok_limit(self, token_id: str, size: float, aggressive_price: float) -> tuple[bool, str, str, float, list]:
         try:
@@ -309,7 +339,10 @@ class ExecutionClient:
             return False, status, order_id, aggressive_price, fills
 
         except Exception as exc:
-            return False, str(exc), "", aggressive_price, []
+            err_msg = str(exc)
+            if self._is_auth_or_connection_error(err_msg):
+                self.reset_client()
+            return False, err_msg, "", aggressive_price, []
 
     def execute_brutal_order(
         self,
@@ -376,8 +409,13 @@ class ExecutionClient:
         for attempt in range(self.MAX_RETRIES):
             aggressive_price = self._aggressive_price(price, dynamic_slippage, tick_size)
             validated_price = self._validate_price(aggressive_price, tick_size)
+
+            # Issue 2.B Fix: Recalculate contract size dynamically per attempt based on validated execution price
+            if validated_price > 0:
+                current_size = round(amount / validated_price, 4)
+                size = round(current_size / tick_size) * tick_size
             
-            log(f"[BRUTAL] Attempt {attempt + 1}/{self.MAX_RETRIES}: price={validated_price:.3f} (slippage={dynamic_slippage:.2%})")
+            log(f"[BRUTAL] Attempt {attempt + 1}/{self.MAX_RETRIES}: price={validated_price:.3f}, size={size} (slippage={dynamic_slippage:.2%})")
             
             filled, status, order_id, exec_price, fills = self._try_order_fok_market(token_id, size, validated_price)
             
@@ -419,43 +457,47 @@ class ExecutionClient:
             log(f"[BRUTAL] FOK Market failed: {status}")
             last_error = status
 
-            filled, status, order_id, exec_price, fills = self._try_order_fok_limit(token_id, size, validated_price)
-            if filled:
-                elapsed_ms = int((time.time() - start_time) * 1000)
-                actual_slippage = (exec_price - price) / price
-                
-                log(f"[BRUTAL] FOK LIMIT SUCCESS @ attempt {attempt + 1}")
-                log(f"   filled: ${amount:.2f} @ {exec_price:.3f}")
-                
-                self._log_order(OrderLog(
-                    timestamp=datetime.utcnow().isoformat(),
-                    token_id=token_id,
-                    side="BUY",
-                    amount=amount,
-                    size=size,
-                    requested_price=price,
-                    filled_price=exec_price,
-                    status="filled",
-                    order_id=order_id,
-                    attempt=attempt + 1,
-                    slippage=actual_slippage
-                ))
-                
-                return ExecutionResult(
-                    ok=True,
-                    status=status,
-                    order_id=order_id,
-                    price=exec_price,
-                    size=size,
-                    filled=True,
-                    fills=fills,
-                    slippage_used=dynamic_slippage,
-                    attempt_count=attempt + 1,
-                    total_time_ms=elapsed_ms
-                )
+            # Safety Guard against Double Execution (Issue 2.A):
+            # If FOK Market failed due to a retryable/ambiguous network or timeout error,
+            # DO NOT immediately submit a secondary FOK Limit order in the same attempt loop.
+            if not self._retryable_error(last_error):
+                filled, status, order_id, exec_price, fills = self._try_order_fok_limit(token_id, size, validated_price)
+                if filled:
+                    elapsed_ms = int((time.time() - start_time) * 1000)
+                    actual_slippage = (exec_price - price) / price
 
-            log(f"[BRUTAL] FOK Limit failed: {status}")
-            last_error = status
+                    log(f"[BRUTAL] FOK LIMIT SUCCESS @ attempt {attempt + 1}")
+                    log(f"   filled: ${amount:.2f} @ {exec_price:.3f}")
+
+                    self._log_order(OrderLog(
+                        timestamp=datetime.utcnow().isoformat(),
+                        token_id=token_id,
+                        side="BUY",
+                        amount=amount,
+                        size=size,
+                        requested_price=price,
+                        filled_price=exec_price,
+                        status="filled",
+                        order_id=order_id,
+                        attempt=attempt + 1,
+                        slippage=actual_slippage
+                    ))
+
+                    return ExecutionResult(
+                        ok=True,
+                        status=status,
+                        order_id=order_id,
+                        price=exec_price,
+                        size=size,
+                        filled=True,
+                        fills=fills,
+                        slippage_used=dynamic_slippage,
+                        attempt_count=attempt + 1,
+                        total_time_ms=elapsed_ms
+                    )
+
+                log(f"[BRUTAL] FOK Limit failed: {status}")
+                last_error = status
 
             if self._retryable_error(last_error) and attempt < self.MAX_RETRIES - 1:
                 log(f"[BRUTAL] Retryable error, waiting {backoff}s (exponential backoff)")
